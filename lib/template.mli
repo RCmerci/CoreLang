@@ -1,13 +1,17 @@
+open Syntax 
 type addr
-
+type primtive
+   
 type ti_stack
 
 type ti_dump
 
 type node =
   | NAp of (addr * addr)
-  | NSupercomb of (string * string list * Syntax.core_expr)
-  | NNum of addr
+  | NSupercomb of (name * name list * core_expr)
+  | NNum of int
+  | NInd of addr
+  | NPrim of (name * primtive)
 
 type ti_heap
 
