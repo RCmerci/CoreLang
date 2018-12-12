@@ -1,2 +1,3 @@
 (library
+ (flags (-w -8))
  (public_name corelang))
