@@ -14,7 +14,8 @@ type instruction =
   | Push_int of int
   | Push of int
   | Mkap
-  | Slide of int
+  | Update of int
+  | Pop of int
 
 let instr_equal i1 i2 =
   match (i1, i2) with
@@ -23,7 +24,8 @@ let instr_equal i1 i2 =
   | Push_int a, Push_int b -> a = b
   | Push a, Push b -> a = b
   | Mkap, Mkap -> true
-  | Slide a, Slide b -> a = b
+  | Update a, Update b -> a = b
+  | Pop a, Pop b -> a = b
   | _ -> false
 
 type addr = int
@@ -35,16 +37,20 @@ type gmStack = addr list
 module Addr = struct
   type t = addr
 
-  let equal = ( = )
-
-  let hash t = t
+  let compare a b = a - b
 end
 
-module Heap_hashtbl = Hashtbl.Make (Addr)
+module Heap_map = Map.Make (Addr)
 
-type node = NNum of int | NAp of (addr * addr) | NGlobal of (int * gmCode)
+(* module Heap_hashtbl = Hashtbl.Make (Addr) *)
 
-type gmHeap = node Heap_hashtbl.t
+type node =
+  | NNum of int
+  | NAp of (addr * addr)
+  | NGlobal of (int * gmCode)
+  | NInd of addr
+
+type gmHeap = node Heap_map.t
 
 module Name = struct
   type t = name
@@ -70,13 +76,13 @@ let getStack (_, i, _, _, _) = i
 let putStack i (code, _, heap, globals, stats) = (code, i, heap, globals, stats)
 
 let halloc heap node =
-  let addr = Heap_hashtbl.length heap in
-  Heap_hashtbl.add heap addr node ;
-  (heap, addr)
+  let addr = Heap_map.cardinal heap in
+  let heap' = Heap_map.add addr node heap in
+  (heap', addr)
 
 let hupdate heap addr node =
-  Heap_hashtbl.add heap addr node ;
-  heap
+  let heap' = Heap_map.add addr node heap in
+  heap'
 
 let getHeap (_, _, i, _, _) = i
 
@@ -101,12 +107,12 @@ let push_int n state =
   let heap', addr = halloc heap (NNum n) in
   putHeap heap' (putStack (addr :: getStack state) state)
 
-let getarg (NAp (_, a2)) = a2
+let getarg n = match n with NAp (_, a2) -> a2 | _ -> failwith "getarg"
 
 let push n state =
   let stack = getStack state in
   let heap = getHeap state in
-  let addr = getarg (Heap_hashtbl.find heap (List.nth stack (n + 1))) in
+  let addr = getarg (Heap_map.find (List.nth stack (n + 1)) heap) in
   putStack (addr :: stack) state
 
 let mkap state =
@@ -118,13 +124,13 @@ let mkap state =
   let heap', a3 = halloc (getHeap state) (NAp (a1, a2)) in
   putHeap heap' (putStack (a3 :: stack) state)
 
-let slide n state =
-  let a, stack =
-    match getStack state with
-    | a :: stack -> (a, stack)
-    | _ -> failwith "slide"
-  in
-  putStack (a :: drop stack n) state
+(* let slide n state =
+ *   let a, stack =
+ *     match getStack state with
+ *     | a :: stack -> (a, stack)
+ *     | _ -> failwith "slide"
+ *   in
+ *   putStack (a :: drop stack n) state *)
 
 let unwind state =
   let a, stack =
@@ -144,9 +150,29 @@ let unwind state =
           failwith
             (Printf.sprintf "not enough arg, %d, %d" (List.length stack) n)
         else putCode c state
+    | NInd addr ->
+        let code = getCode state in
+        putStack (addr :: stack) state |> putCode (Unwind :: code)
   in
-  let node = Heap_hashtbl.find heap a in
+  let node = Heap_map.find a heap in
   newstate node
+
+let update i state =
+  let a, stack =
+    match getStack state with
+    | a :: stack -> (a, stack)
+    | _ -> failwith "update1"
+  in
+  let an =
+    match List.nth_opt stack i with
+    | Some an -> an
+    | None -> failwith "update2"
+  in
+  putHeap (hupdate (getHeap state) an (NInd a)) state |> putStack stack
+
+let pop n state =
+  let rec aux l n = if n = 0 then l else aux (List.tl l) (n - 1) in
+  putStack (aux (getStack state) n) state
 
 let dispatch instr state =
   match instr with
@@ -154,8 +180,9 @@ let dispatch instr state =
   | Push_int n -> push_int n state
   | Push n -> push n state
   | Mkap -> mkap state
-  | Slide n -> slide n state
   | Unwind -> unwind state
+  | Update i -> update i state
+  | Pop n -> pop n state
 
 let isFinal state = match getCode state with [] -> true | _ -> false
 
@@ -199,7 +226,7 @@ let rec compileC : gm_compiler =
 
 let compileR expr env =
   let count = Global_map.cardinal env in
-  List.append (compileC expr env) [Slide (count + 1); Unwind]
+  List.append (compileC expr env) [Update count; Pop count; Unwind]
 
 let compileSC ((name, env, body) : core_sc_defn) : gm_compile_sc =
   let env' =
@@ -215,7 +242,7 @@ let allocGlobal heap (sc : gm_compile_sc) =
 
 let buildInitHeap (prog : core_program) : gmHeap * gmGlobals =
   let compiled = List.map (fun def -> compileSC def) prog in
-  let initheap = Heap_hashtbl.create 100 in
+  let initheap = Heap_map.empty in
   let initglobals = Global_map.empty in
   List.fold_left
     (fun (heap, globals) e ->
@@ -242,7 +269,8 @@ let show_instr instr =
   | Push_int i -> iappend (istr "pushint ") (inum i)
   | Push i -> iappend (istr "push ") (inum i)
   | Mkap -> istr "mkap"
-  | Slide i -> iappend (istr "slide ") (inum i)
+  | Update i -> iappend (istr "update ") (inum i)
+  | Pop i -> iappend (istr "pop ") (inum i)
 
 let show_instrs code =
   iconcat
@@ -253,9 +281,8 @@ let show_instrs code =
     ; istr "        }"
     ; inewline ]
 
-let show_sc s (name, addr) =
-  match Heap_hashtbl.find (getHeap s) addr with
-  | NNum _ | NAp _ -> failwith "show_sc"
+let rec show_sc s (name, addr) =
+  match Heap_map.find addr (getHeap s) with
   | NGlobal (i, code) ->
       iconcat
         [ istr "code for :"
@@ -264,6 +291,9 @@ let show_sc s (name, addr) =
         ; show_instrs code
         ; inewline
         ; inewline ]
+  | NInd i -> iconcat [istr "ind "; inum i; istr " -> "; show_sc s (name, i)]
+  | NAp _ -> istr "ap"
+  | NNum n -> iappend (istr "num: ") (inum n)
 
 let show_addr addr = Printf.sprintf "%d" addr
 
@@ -273,23 +303,28 @@ let show_node state addr n =
   | NAp (a1, a2) ->
       iconcat [istr "ap "; istr (show_addr a1); istr " "; istr (show_addr a2)]
   | NGlobal (i, code) ->
-      let (Some name) =
-        Global_map.fold
-          (fun name v r ->
-            match r with
-            | Some r' -> r
-            | None when addr = v -> Some name
-            | _ -> None )
-          (getGlobals state) None
+      let name =
+        match
+          Global_map.fold
+            (fun name v r ->
+              match r with
+              | Some r' -> r
+              | None when addr = v -> Some name
+              | _ -> None )
+            (getGlobals state) None
+        with
+        | Some name -> name
+        | None -> failwith "show_node"
       in
       iconcat [istr "Global "; istr name]
+  | NInd a -> iconcat [istr "ind "; istr (show_addr a)]
 
 let show_stack_item state addr =
   let heap = getHeap state in
   iconcat
     [ istr (show_addr addr)
     ; istr ": "
-    ; show_node state addr (Heap_hashtbl.find heap addr) ]
+    ; show_node state addr (Heap_map.find addr heap) ]
 
 let show_stack state =
   iinterleave inewline (List.map (show_stack_item state) (getStack state))
@@ -298,7 +333,7 @@ let show_state state =
   iconcat [show_stack state; inewline; show_instrs (getCode state); inewline]
 
 let show_result states =
-  let (s :: _) = states in
+  let s = List.hd states in
   idisplay
     (iconcat
        [ istr "supercombinator definitions"

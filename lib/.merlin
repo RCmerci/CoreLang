@@ -1,3 +1,3 @@
 B ../_build/default/lib/.corelang.objs
 S .
-FLG -open Corelang -w -8
+FLG -open Corelang -w -27
